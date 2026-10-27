@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "kondash": {
+      "baseUrl": "http://127.0.0.1:8317/v1",
+      "api": "openai-responses",
+      "apiKey": "!cat /absolute/path/to/cliproxyapi/proxy-key",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "<deployment-id>",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 128000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}

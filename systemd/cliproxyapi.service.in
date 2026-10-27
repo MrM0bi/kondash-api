@@ -1,0 +1,19 @@
+# Managed by kondash-cliproxyapi
+[Unit]
+Description=CLIProxyAPI with KONDash preconfigured
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=:@BINARY@ -config @CONFIG@ -local-model
+WorkingDirectory=@DIRECTORY@
+UMask=0077
+NoNewPrivileges=true
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,7 @@
+{
+  "model": "<deployment-id>",
+  "apiKeyHelper": "cat /absolute/path/to/cliproxyapi/proxy-key",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8317"
+  }
+}

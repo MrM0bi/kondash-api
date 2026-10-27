@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+/.secrets/
+/config.yaml
+/config.json
+/proxy-key
+*.key
+*.pem
+*.tar.gz
+/auth/
+/logs/

@@ -1,0 +1,46 @@
+# Sanitized CLIProxyAPI 8.0.44 example. The installer fills private values locally.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+management:
+  secret-key: "<local-management-key>"  # CLIProxyAPI replaces it with a bcrypt hash on startup
+  allow-remote: false
+  disable-control-panel: false
+  disable-auto-update-panel: true
+access:
+  api-keys: ["<local-proxy-key>"]
+oauth:
+  auth-dir: "<private-config-directory>/auth"
+multimedia:
+  disable-image-generation: true
+api-keys:
+  codex:
+    - name: kondash-responses
+      base-url: "https://kondash.konverto.eu/v1"
+      keys:
+        - api-key: "<upstream-kondash-api-key>"
+          disable-codex-cloaking: true
+      models:
+        - name: "<deployment-id>"
+          alias: "<deployment-id>"
+          input-modalities: [text]
+          output-modalities: [text]
+  openai-compatibility:
+    - name: OpenAPI-Compatible
+      base-url: "http://127.0.0.1:8317/v1"
+      keys:
+        - api-key: "<same-local-proxy-key>"
+      models:
+        - name: "<deployment-id>"
+          alias: "<deployment-id>-proxy"
+          use-max-completion-tokens: true
+observability:
+  logs:
+    debug: false
+    logging-to-file: true  # <auth-dir>/logs; files older than 30 days removed daily by cliproxyapi-log-cleanup.timer
+    request-log: false
+    error-logs-max-files: 5
+    logs-max-total-size-mb: 100
+  usage:
+    usage-statistics-enabled: false

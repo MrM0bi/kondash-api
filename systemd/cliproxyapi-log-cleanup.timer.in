@@ -1,0 +1,10 @@
+# Managed by kondash-cliproxyapi
+[Unit]
+Description=Daily CLIProxyAPI log cleanup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

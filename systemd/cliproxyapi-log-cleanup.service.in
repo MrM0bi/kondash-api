@@ -1,0 +1,7 @@
+# Managed by kondash-cliproxyapi
+[Unit]
+Description=Delete CLIProxyAPI logs older than 30 days
+
+[Service]
+Type=oneshot
+ExecStart=find @LOGS@ -type f -name "*.log" ! -name main.log -mtime +30 -delete

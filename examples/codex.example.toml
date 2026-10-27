@@ -1,0 +1,13 @@
+# Connection example; compatible model metadata may also be needed.
+model = "<deployment-id>"
+model_provider = "kondash"
+web_search = "disabled"
+
+[model_providers.kondash]
+name = "KONDash"
+base_url = "http://127.0.0.1:8317/v1"
+wire_api = "responses"
+
+[model_providers.kondash.auth]
+command = "/usr/bin/cat"
+args = ["/absolute/path/to/cliproxyapi/proxy-key"]
