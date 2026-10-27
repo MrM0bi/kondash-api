@@ -16,6 +16,8 @@ Coding-agent compatibility needs more than a successful text response. A model m
 
 Different deployments may implement different subsets of the advertised protocols. In particular, string-only Chat message content and limited Responses tool formats can prevent otherwise OpenAI-compatible clients from working directly.
 
+As of 2026-10-27, KONDash ignores requested effort levels and uses medium effort by default. Client effort controls can change the outgoing request without changing upstream model behavior.
+
 ## Provider configuration
 
 The generated YAML contains two normal CLIProxyAPI provider groups:
