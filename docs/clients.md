@@ -71,7 +71,7 @@ python3 configure_agents.py --model '<deployment-id>' --reasoning-efforts low hi
 python3 configure_agents.py --model '<deployment-id>' --reasoning-efforts            # no thinking controls
 ```
 
-This choice is remembered in the private setup manifest and retained when refreshing models; `install.py --uninstall --purge` deletes it. As of 2026-10-27, KONDash accepts but ignores the effort value, so the levels change the request but not the model's behavior. OpenCode v1 has no automatic reasoning setup in this script.
+This choice is remembered in the private setup manifest and retained when refreshing models; `install.py --uninstall --purge` deletes it. As of 2026-10-27, KONDash accepts but ignores requested effort levels and uses medium effort by default, so the levels change the request but not the model's behavior. OpenCode v1 has no automatic reasoning setup in this script.
 
 Codex retains the selected model's catalog levels and accepts, for example, `codex --profile kondash -c 'model_reasoning_effort="high"'`. Pi accepts `pi --provider kondash --model '<deployment-id>' --thinking high`. OpenCode v2 accepts `opencode run --model 'kondash/<deployment-id>#high'`. Claude Code accepts `claude-kondash --effort high`. Use a level the model and client support; a successful settings change alone does not demonstrate upstream reasoning support.
 
