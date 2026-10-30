@@ -179,7 +179,7 @@ class Plan:
         identity = str(path) + '::' + json.dumps(member_path)
         if (current is not MISSING and current != value and not self.replace
                 and self.state["entries"].get(identity) != digest(current)):
-            raise SetupError("The KONDash provider/auth entry already exists or was edited.",
+            raise SetupError("The managed agent configuration entry already exists or was edited.",
                              "Run again with --replace; the current file is backed up first.")
         if current is MISSING or current != value:
             change["after"] = upsert_jsonc(text, member_path, value).encode()
@@ -435,6 +435,11 @@ def configure(args):
                                                 for level in oc_efforts[model]]} if oc_efforts.get(model) else {}),
                                'limit': {'context': 128000, 'output': 8192}} for model in models}}
         plan.entry(path, ('providers' if modern else 'provider', PROVIDER), provider)
+        if getattr(args, 'kova_mcp', False):
+            server = {'type': 'local', 'command': ['kova', '--mcp']}
+            if not modern:
+                server['enabled'] = True
+            plan.entry(path, ('mcp', 'servers', 'kova') if modern else ('mcp', 'kova'), server)
     if 'pi' in executables:
         folder = safe_path(os.environ.get('PI_CODING_AGENT_DIR', Path.home() / '.pi/agent'))
         provider = {'name': 'KONDash', 'baseUrl': base_url, 'api': 'openai-responses',
@@ -511,6 +516,8 @@ def main():
     parser.add_argument('--reasoning-efforts', nargs='*', choices=EFFORTS,
                         help='Limit the selected model to these Pi/OpenCode v2 reasoning levels (default: all); remembered privately. Pass no levels to disable.')
     parser.add_argument('--replace', action='store_true', help='Back up and replace conflicting or edited KONDash entries/profiles')
+    parser.add_argument('--kova-mcp', action='store_true',
+                        help='Configure kova --mcp as a global MCP server in OpenCode only (requires kova on its PATH)')
     parser.add_argument('--dry-run', action='store_true', help='Preflight and report planned changes without writing files')
     args = parser.parse_args()
     if 'all' in args.agents and args.agents != ['all']:

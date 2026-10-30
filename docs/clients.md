@@ -77,7 +77,15 @@ Codex retains the selected model's catalog levels and accepts, for example, `cod
 
 ## MCP
 
-MCP servers belong to each coding agent, independently of its model provider. Client-defined MCP tools pass through the same function-tool loop as coding tools. This script preserves existing MCP settings; it does not install or approve third-party servers.
+MCP servers belong to each coding agent, independently of its model provider. Client-defined MCP tools pass through the same function-tool loop as coding tools. This script preserves existing MCP settings by default; it does not install third-party servers.
+
+To register Kova globally in OpenCode, add `--kova-mcp`:
+
+```bash
+python3 configure_agents.py --agents opencode --kova-mcp
+```
+
+This adds a local server named `kova` running `kova --mcp` to OpenCode's user configuration, using the v1 or v2 schema as appropriate. Kova must already be installed and available on OpenCode's `PATH`. The flag applies only when OpenCode is being configured; other clients are unaffected. Existing servers and JSONC comments are preserved. `--dry-run` previews the file changes; conflicting or edited Kova entries require `--replace` and are backed up first. Later runs without the flag leave the Kova entry in place.
 
 Use the agent's normal MCP configuration. Pi can expose small servers directly with `"exposure": "direct"`; its codemode/deferred exposure needs the relevant discovery tools enabled. When using an explicit Pi `--tools` list, include the server's `mcp__<server>__*` tools and resource tools as needed. In noninteractive Codex runs, the server/tool approval policy must allow the intended tool. An approval rejection is distinct from an API-format failure. The test runner grants access only to its harmless synthetic fixture server in its isolated profile.
 
