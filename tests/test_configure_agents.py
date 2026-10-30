@@ -101,6 +101,7 @@ class SetupTests(unittest.TestCase):
         claude = self.write(self.home / '.claude/settings.json', '{"model":"other"}')
         self.run_setup()
         oc = setup.parse_jsonc(opencode.read_text())
+        self.assertNotIn('mcp', oc)
         self.assertEqual(oc['model'], 'other/model')
         self.assertIn('// my defaults', opencode.read_text())
         provider = oc['providers']['kondash']
@@ -279,6 +280,65 @@ class SetupTests(unittest.TestCase):
         self.args.codex_catalog = self.write(self.home / 'private-catalog.json', json.dumps(self.catalog))
         self.run_setup()
         self.assertIn('model = "example-alias-proxy"', (self.home / '.codex/kondash.config.toml').read_text())
+
+    def test_kova_mcp_preserves_settings_and_is_idempotent(self):
+        self.args.kova_mcp = True
+        path = self.write(self.config / 'opencode/opencode.jsonc',
+                          '{// keep MCP settings\n"mcp":{"timeout":{"startup":45000},'
+                          '"servers":{"other":{"type":"local","command":["other"]}}}}')
+        self.run_setup()
+        data = setup.parse_jsonc(path.read_text())
+        self.assertEqual(data['mcp']['servers']['kova'],
+                         {'type': 'local', 'command': ['kova', '--mcp']})
+        self.assertEqual(data['mcp']['servers']['other']['command'], ['other'])
+        self.assertEqual(data['mcp']['timeout'], {'startup': 45000})
+        self.assertIn('// keep MCP settings', path.read_text())
+        self.assertNotIn('Updated', self.run_setup())
+        self.args.kova_mcp = False
+        self.run_setup()
+        self.assertEqual(setup.parse_jsonc(path.read_text())['mcp'], data['mcp'])
+        for filename in (self.home / '.pi/agent/models.json', self.home / '.codex/kondash.config.toml',
+                         self.gateway / 'agents/claude.settings.json'):
+            self.assertNotIn('kova', filename.read_text())
+
+    def test_kova_mcp_conflict_requires_replace_and_backup(self):
+        self.args.agents = ['opencode']
+        self.args.kova_mcp = True
+        original = '{"mcp":{"servers":{"kova":{"type":"local","command":["custom"]}}}}'
+        path = self.write(self.config / 'opencode/opencode.json', original)
+        with self.assertRaises(setup.SetupError) as caught:
+            self.run_setup()
+        self.assertIn('--replace', caught.exception.fix)
+        self.assertEqual(path.read_text(), original)
+        self.assertFalse((self.gateway / 'agents').exists())
+        self.args.replace = True
+        self.run_setup()
+        self.assertEqual(json.loads(path.read_text())['mcp']['servers']['kova']['command'], ['kova', '--mcp'])
+        backups = list((self.gateway / 'agents/backups').glob('before-*/*-opencode.json'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), original)
+
+    def test_kova_mcp_dry_run_writes_nothing(self):
+        self.args.kova_mcp = True
+        self.args.dry_run = True
+        self.run_setup()
+        self.assertFalse((self.config / 'opencode').exists())
+        self.assertFalse((self.gateway / 'agents').exists())
+
+    def test_kova_mcp_ignored_without_opencode(self):
+        self.args.agents = ['pi']
+        self.args.kova_mcp = True
+        self.run_setup()
+        self.assertFalse((self.config / 'opencode').exists())
+        self.assertNotIn('kova', (self.home / '.pi/agent/models.json').read_text())
+
+    def test_kova_mcp_v1_schema(self):
+        self.args.agents = ['opencode']
+        self.args.kova_mcp = True
+        with patch.object(setup, 'client_version', return_value=(1, 2, 27)):
+            self.run_setup()
+        data = json.loads((self.config / 'opencode/opencode.json').read_text())
+        self.assertEqual(data['mcp'], {'kova': {'type': 'local', 'command': ['kova', '--mcp'], 'enabled': True}})
 
     def test_opencode_v1_schema(self):
         self.args.agents = ['opencode']
