@@ -87,6 +87,168 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(json.dumps('a: b # c\nquoted "value"'), rendered)
         self.assertIn("enabled: false", rendered)
 
+    def test_reliability_defaults_do_not_override_inference_controls(self):
+        profile = install.reliability_profile()
+        self.assertEqual(profile["routing"]["cooldown"]["transient-error-cooldown-seconds"], -1)
+        self.assertEqual(profile["routing"]["retry"]["request-retry"], 1)
+        self.assertTrue(profile["requests"]["streaming"]["send-keepalive-before-ft"])
+        self.assertNotIn("payload", profile["requests"])
+
+    def test_workaround_merge_retains_custom_payload_rules_and_is_idempotent(self):
+        current = install.build_config("https://gateway.example/v1", ["example-coder"],
+                                       "synthetic-upstream", "synthetic-local", 8317, self.root,
+                                       "synthetic-management")
+        custom = {"models": [{"name": "example-coder", "protocol": "codex"}],
+                  "params": {"max_output_tokens": 4096, "temperature": 0.7}}
+        current["requests"]["payload"] = {"default": [custom]}
+        original = json.loads(json.dumps(current))
+        patch = install.workaround_patch(current)
+        self.assertNotIn("payload", patch["requests"])
+        self.assertTrue(install.contains_patch(current, patch))
+        self.assertEqual(current, original)
+        with self.assertRaisesRegex(install.SetupError, "provider is missing"):
+            install.workaround_patch({})
+
+    def test_workaround_migrates_unsupported_legacy_model_fields_only(self):
+        current = install.build_config("https://gateway.example/v1", ["example-coder"],
+                                       "synthetic-upstream", "synthetic-local", 8317, self.root,
+                                       "synthetic-management")
+        old = json.loads(json.dumps(current))
+        model = old["api-keys"]["codex"][0]["models"][0]
+        model.update({"input-modalities": ["text"], "output-modalities": ["text"]})
+        patch = install.workaround_patch(old)
+        self.assertEqual(patch["api-keys"]["codex"], current["api-keys"]["codex"])
+        self.assertIn("input-modalities", old["api-keys"]["codex"][0]["models"][0])
+        self.assertNotIn("api-keys", install.workaround_patch(current))
+
+    def workaround_context(self, edited=False):
+        current = install.build_config("https://gateway.example/v1", ["example-coder"],
+                                       "synthetic-upstream", "synthetic-local", 8317, self.root,
+                                       "synthetic-management")
+        del current["routing"]
+        del current["requests"]
+        current["custom-section"] = {"keep": "user-setting"}
+        config = self.targets["config"] / "config.yaml"
+        install.atomic_write(config, json.dumps(current))
+        metadata = {"managed_by": install.OWNER, "port": 8317,
+                    "config_sha256": "pre-edit-hash" if edited else hashlib.sha256(config.read_bytes()).hexdigest()}
+        install.atomic_write(self.targets["config"] / "kondash-install.json", json.dumps(metadata))
+        install.atomic_write(self.targets["config"] / "management-key", "synthetic-management\n")
+        install.atomic_write(self.targets["config"] / "proxy-key", "synthetic-local\n")
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(install, "paths", return_value=self.targets))
+        stack.enter_context(patch.object(install.os, "getuid", return_value=12345))
+        ready = stack.enter_context(patch.object(install, "wait_ready"))
+
+        def management(port, key, method="GET", patch=None, etag=None):
+            self.assertEqual((port, key), (8317, "synthetic-management"))
+            data = json.loads(config.read_text())
+            tag = '"' + hashlib.sha256(config.read_bytes()).hexdigest() + '"'
+            if method == "PATCH":
+                self.assertEqual(etag, tag)
+
+                def merge(dst, source):
+                    for k, v in source.items():
+                        if isinstance(v, dict):
+                            merge(dst.setdefault(k, {}), v)
+                        else:
+                            dst[k] = v
+                merge(data, patch)
+                install.atomic_write(config, json.dumps(data))
+                return {"status": "ok"}, None
+            return data, tag
+
+        api = stack.enter_context(patch.object(install, "management_request", side_effect=management))
+        return stack, api, ready, config
+
+    def test_apply_workarounds_preserves_credentials_customizations_and_backup(self):
+        stack, api, ready, config = self.workaround_context()
+        original = config.read_bytes()
+        before = json.loads(original)
+        with stack:
+            install.apply_workarounds()
+            after = json.loads(config.read_bytes())
+            self.assertEqual(after["api-keys"], before["api-keys"])
+            self.assertEqual(after["custom-section"], before["custom-section"])
+            self.assertEqual(after["management"], before["management"])
+            self.assertEqual(after["server"], before["server"])
+            backups = list(config.parent.glob("config.yaml.backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), original)
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+            meta = json.loads((config.parent / "kondash-install.json").read_text())
+            self.assertEqual(meta["config_sha256"], hashlib.sha256(config.read_bytes()).hexdigest())
+            ready.assert_called_once_with(8317, "synthetic-local")
+            saved = config.read_bytes()
+            install.apply_workarounds()
+            self.assertEqual(config.read_bytes(), saved)
+            self.assertEqual(len(list(config.parent.glob("config.yaml.backup-*"))), 1)
+
+    def test_apply_workarounds_keeps_local_edit_protection(self):
+        stack, api, ready, config = self.workaround_context(edited=True)
+        with stack:
+            install.apply_workarounds()
+        meta = json.loads((config.parent / "kondash-install.json").read_text())
+        self.assertEqual(meta["config_sha256"], "pre-edit-hash")
+
+    def test_apply_workarounds_refuses_mismatched_running_configuration(self):
+        stack, api, ready, config = self.workaround_context()
+        original = config.read_bytes()
+        with stack:
+            api.side_effect = None
+            api.return_value = (json.loads(original), '"another-config"')
+            with self.assertRaisesRegex(install.SetupError, "snapshots do not match"):
+                install.apply_workarounds()
+            self.assertEqual(config.read_bytes(), original)
+            self.assertEqual(list(config.parent.glob("config.yaml.backup-*")), [])
+            ready.assert_not_called()
+
+    def test_apply_workarounds_failed_patch_keeps_metadata_and_private_backup(self):
+        stack, api, ready, config = self.workaround_context()
+        original = config.read_bytes()
+        tag = '"' + hashlib.sha256(original).hexdigest() + '"'
+        metadata = (config.parent / "kondash-install.json").read_bytes()
+        with stack:
+            api.side_effect = [(json.loads(original), tag), install.SetupError("precondition failed")]
+            with self.assertRaisesRegex(install.SetupError, "precondition failed"):
+                install.apply_workarounds()
+        self.assertEqual(config.read_bytes(), original)
+        self.assertEqual((config.parent / "kondash-install.json").read_bytes(), metadata)
+        self.assertEqual(list(config.parent.glob("config.yaml.backup-*"))[0].read_bytes(), original)
+
+    def test_management_precondition_error_hides_response_contents(self):
+        error = urllib.error.HTTPError("http://127.0.0.1:8317/v8/management/config", 412, "Conflict", {},
+                                       io.BytesIO(b"synthetic-private-value"))
+        with patch.object(install.urllib.request, "build_opener") as opener:
+            opener.return_value.open.side_effect = error
+            with self.assertRaisesRegex(install.SetupError, "not overwritten") as caught:
+                install.management_request(8317, "synthetic-private-value", "PATCH", {}, '"old"')
+        self.assertNotIn("synthetic-private-value", str(caught.exception))
+
+    def test_workaround_mode_does_not_run_install_or_key_discovery(self):
+        with patch.object(install.sys, "argv", ["install.py", "--apply-workarounds"]), \
+                patch.object(install, "apply_workarounds") as apply, \
+                patch.object(install, "install") as full_install:
+            self.assertEqual(install.main(), 0)
+        apply.assert_called_once_with()
+        full_install.assert_not_called()
+        for extra in (["--reconfigure"], ["--uninstall"], ["--port", "8318"]):
+            with self.subTest(extra=extra), \
+                    patch.object(install.sys, "argv", ["install.py", "--apply-workarounds"] + extra), \
+                    contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                install.main()
+
+    def test_workarounds_refuse_unmanaged_installation_before_contacting_service(self):
+        stack, api, ready, config = self.workaround_context()
+        install.atomic_write(config.parent / "kondash-install.json", json.dumps({"managed_by": "someone-else"}))
+        original = config.read_bytes()
+        with stack, self.assertRaisesRegex(install.SetupError, "not installer-managed"):
+            install.apply_workarounds()
+        api.assert_not_called()
+        self.assertEqual(config.read_bytes(), original)
+
     def archive(self):
         content = io.BytesIO()
         with tarfile.open(fileobj=content, mode="w:gz") as archive:

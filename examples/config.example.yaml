@@ -14,6 +14,18 @@ oauth:
   auth-dir: "<private-config-directory>/auth"
 multimedia:
   disable-image-generation: true
+routing:
+  retry:
+    request-retry: 1  # one additional credential retry round
+    max-retry-interval: 3
+  cooldown:
+    transient-error-cooldown-seconds: -1  # keep quota/rate-limit handling enabled
+requests:
+  nonstream-keepalive-interval: 5
+  streaming:
+    keepalive-seconds: 15
+    bootstrap-retries: 1  # only before downstream output starts
+    send-keepalive-before-ft: true
 api-keys:
   codex:
     - name: kondash-responses
@@ -24,8 +36,6 @@ api-keys:
       models:
         - name: "<deployment-id>"
           alias: "<deployment-id>"
-          input-modalities: [text]
-          output-modalities: [text]
   openai-compatibility:
     - name: OpenAPI-Compatible
       base-url: "http://127.0.0.1:8317/v1"
