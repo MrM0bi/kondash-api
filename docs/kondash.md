@@ -16,7 +16,7 @@ Coding-agent compatibility needs more than a successful text response. A model m
 
 Different deployments may implement different subsets of the advertised protocols. In particular, string-only Chat message content and limited Responses tool formats can prevent otherwise OpenAI-compatible clients from working directly.
 
-As of 2026-10-27, KONDash ignores requested effort levels and uses medium effort by default. Client effort controls can change the outgoing request without changing upstream model behavior.
+Client effort controls change the requested reasoning level. Request forwarding and acceptance do not establish that a deployment uses distinct internal reasoning budgets; validate upstream behavior separately for each deployment.
 
 ## Provider configuration
 
@@ -29,7 +29,7 @@ Clients that already use compatible function tools can select `<deployment-id>`.
 
 Both groups run inside one stock CLIProxyAPI process. The extra localhost translation does not itself make another model inference call. It is a compatibility workaround: reasoning metadata, usage accounting, richer content, and advanced tool behavior can differ after translation. Test the actual client/model combination you plan to use.
 
-Automatic image-generation injection is disabled because text-only coding requests should not gain an image tool implicitly. Text input/output is declared conservatively in this profile. These settings are not assertions about every upstream model's capabilities.
+Automatic image-generation injection is disabled because text-only coding requests should not gain an image tool implicitly. Generated client profiles use conservative text input/output metadata. These settings are not assertions about every upstream model's capabilities.
 
 ## Testing a deployment
 

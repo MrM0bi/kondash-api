@@ -51,6 +51,14 @@ To configure only selected clients, use `python3 configure_agents.py --agents op
 
 The provider appears as **KONDash**. Pi/OpenCode thinking controls are enabled for every model by default; limit or disable them per model with `--model '<deployment-id>' --reasoning-efforts [levels]`. [Live compatibility checks](docs/clients.md#compatibility-checks) cover coding tools, MCP, and effort forwarding using `test_agents.py`.
 
+For an existing running installation, apply the current reliability settings without entering the upstream key again:
+
+```bash
+python3 install.py --apply-workarounds
+```
+
+This backs up the private YAML and uses CLIProxyAPI's management API to merge bounded retries, keepalives and disabled transient-error cooldowns. Existing keys, routes and unrelated settings are retained. New installations get these settings automatically. See [updating an installation](docs/setup.md#reinstall-rotate-a-key-or-refresh-models) for requirements and rollback.
+
 ## Reconfigure or refresh available models
 
 ```bash

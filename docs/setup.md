@@ -53,6 +53,20 @@ The service listens only on IPv4 loopback and requires a local Bearer token. The
 
 ## Reinstall, rotate a key, or refresh models
 
+New configurations include a transport reliability profile: one additional credential retry round, a three-second maximum cooldown wait, one pre-output bootstrap retry, streaming keepalives every 15 seconds (including before the first token), non-streaming whitespace keepalives every five seconds, and no transient-error cooldown. Quota/rate-limit cooldowns remain enabled. Retry settings apply per routing layer; the compatibility route can make more attempts than the direct route. Output already delivered to a client is not replayed.
+
+To apply this profile to an existing installation without replacing its YAML or requesting the upstream key again:
+
+```bash
+python3 install.py --apply-workarounds
+```
+
+The managed service must already be running, with its loopback management API enabled and the original private `management-key` and `proxy-key` files present. This operation uses the installed service's v8 management API, creates a mode-`0600` `config.yaml.backup-*`, and hot-reloads the specific profile settings. It preserves credentials, models, custom payload rules and unrelated settings; it also removes two obsolete model fields emitted by older installers. It uses a configuration ETag to reject concurrent edits. Repeating it is a no-op when the profile is already applied. It does not download a release, rotate keys, rediscover models or require a restart.
+
+The profile does not add inference payload overrides: it neither forces effort nor raises requested token budgets. Protocol translators may still normalize or drop fields; verify actual upstream controls when exact budgets matter. Stock CLIProxyAPI's Codex/Responses executor already streams upstream and collects the result for non-streaming clients. The keepalives keep downstream connections active; they do not change a remote server's timeout. Structured-output validation, empty-output checks and handling unavailable usage data remain client responsibilities.
+
+To roll back, restore the printed backup over the private `config.yaml`, keep its mode `0600`, and restart `cliproxyapi.service`. Local-edit protection for full reconfiguration remains in place after applying the profile.
+
 Rerun `python3 install.py` to install the pinned release and service again while preserving the existing YAML and local key. It does not need the upstream key again when preserving an existing managed configuration.
 
 To set a new upstream key or refresh model discovery:

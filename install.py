@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Install or uninstall a stock CLIProxyAPI user service configured for KONDash."""
 import argparse
+import copy
 import getpass
 import hashlib
 import io
@@ -35,6 +36,19 @@ UNITS = (SERVICE, CLEANUP + ".service", CLEANUP + ".timer")
 OWNER = "kondash-cliproxyapi"
 PROXY_SUFFIX = "-proxy"  # translated (Chat Completions) route; plain IDs are the direct route
 ROOT = Path(__file__).resolve().parent
+
+
+def reliability_profile():
+    """Stock v8 transport settings, without rewriting inference controls."""
+    return {
+        "routing": {"retry": {"request-retry": 1, "max-retry-interval": 3},
+                    "cooldown": {"transient-error-cooldown-seconds": -1}},
+        "requests": {
+            "nonstream-keepalive-interval": 5,
+            "streaming": {"keepalive-seconds": 15, "bootstrap-retries": 1,
+                          "send-keepalive-before-ft": True},
+        },
+    }
 
 
 class SetupError(Exception):
@@ -142,12 +156,11 @@ def build_config(base_url, models, upstream_key, local_key, port, config_dir, ma
         "access": {"api-keys": [local_key]},
         "oauth": {"auth-dir": str(config_dir / "auth")},
         "multimedia": {"disable-image-generation": True},
+        **reliability_profile(),
         "api-keys": {
             "codex": [{"name": "kondash-responses", "base-url": base_url,
                        "keys": [{"api-key": upstream_key, "disable-codex-cloaking": True}],
-                       "models": [{"name": model, "alias": model,
-                                   "input-modalities": ["text"], "output-modalities": ["text"]}
-                                  for model in models]}],
+                       "models": [{"name": model, "alias": model} for model in models]}],
             "openai-compatibility": [{"name": "OpenAPI-Compatible",
                                       "base-url": f"http://127.0.0.1:{port}/v1",
                                       "keys": [{"api-key": local_key}],
@@ -295,6 +308,111 @@ def user_manager_reachable():
         return True
     except SetupError:
         return False
+
+
+def management_request(port, key, method="GET", patch=None, etag=None):
+    """Use stock CLIProxyAPI's validated YAML merge, not a home-grown YAML parser."""
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    if etag:
+        headers["If-Match"] = etag
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v8/management/config", method=method,
+        headers=headers, data=json.dumps(patch).encode() if patch is not None else None)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=15) as response:
+            return json.load(response), response.headers.get("ETag")
+    except urllib.error.HTTPError as error:
+        status = error.code
+        error.close()
+        if status == 412:
+            raise SetupError("The configuration changed during the update; it was not overwritten.",
+                             "Run --apply-workarounds again after the other writer has finished.") from None
+        raise SetupError(f"Local management API rejected the update (HTTP {status}); body withheld.",
+                         "Check that the service is running with its management API enabled and its original management-key.") from None
+    except (OSError, ValueError):
+        raise SetupError("Could not confirm the local management operation; response contents withheld.",
+                         "Check the service and its config.yaml before retrying. A failed connection may occur after a save.") from None
+
+
+def workaround_patch(current):
+    groups = current.get("api-keys", {}).get("codex", [])
+    models = sorted({model["name"] for group in groups if group.get("name") == "kondash-responses"
+                     for model in group.get("models", []) if isinstance(model.get("name"), str) and model["name"]})
+    if not models:
+        raise SetupError("The managed KONDash Responses provider is missing; no update was made.")
+    patch = reliability_profile()
+    # Older installer versions emitted these unsupported CodexModel fields.
+    # Startup ignored them, but v8's strict management validation rejects them.
+    cleaned = copy.deepcopy(groups)
+    for group in cleaned:
+        if group.get("name") == "kondash-responses":
+            for model in group.get("models", []):
+                model.pop("input-modalities", None)
+                model.pop("output-modalities", None)
+    if cleaned != groups:
+        patch["api-keys"] = {"codex": cleaned}
+    return patch
+
+
+def contains_patch(current, patch):
+    return (isinstance(current, dict) and all(
+        contains_patch(current.get(key), value) if isinstance(value, dict)
+        else current.get(key) == value for key, value in patch.items()))
+
+
+def apply_workarounds():
+    """Patch an existing managed installation without key rotation or rediscovery."""
+    if sys.platform != "linux" or os.getuid() == 0:
+        raise SetupError("Run this as your normal Linux user, without sudo.")
+    targets = paths()
+    config_path = targets["config"] / "config.yaml"
+    metadata_path = targets["config"] / "kondash-install.json"
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, ValueError):
+        raise SetupError("Cannot verify installer ownership; no update was made.") from None
+    if not isinstance(metadata, dict) or metadata.get("managed_by") != OWNER:
+        raise SetupError("This configuration is not installer-managed; no update was made.")
+    port = metadata.get("port", 8317)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise SetupError("The installation metadata contains an invalid port.")
+    try:
+        original = config_path.read_bytes()
+        management_key = (targets["config"] / "management-key").read_text().strip()
+        local_key = (targets["config"] / "proxy-key").read_text().strip()
+    except OSError:
+        raise SetupError("The existing configuration or private key files are missing.") from None
+    if not management_key or not local_key:
+        raise SetupError("An existing private key file is empty; contents withheld.")
+    step("Updating the existing gateway reliability settings")
+    current, etag = management_request(port, management_key)
+    original_hash = hashlib.sha256(original).hexdigest()
+    if etag != '"' + original_hash + '"':
+        raise SetupError("The running service and config.yaml snapshots do not match; no update was made.",
+                         "Check the running service's configuration path and retry.")
+    patch = workaround_patch(current)
+    if contains_patch(current, patch):
+        skip("The current reliability settings are already applied; nothing changed.")
+        return
+    backup = config_path.with_name("config.yaml.backup-" + time.strftime("%Y%m%d-%H%M%S")
+                                   + "-" + secrets.token_hex(3))
+    atomic_write(backup, original)
+    ok("Saved a private backup in " + tidy(backup))
+    management_request(port, management_key, "PATCH", patch, etag)
+    updated, updated_etag = management_request(port, management_key)
+    saved = config_path.read_bytes()
+    if not contains_patch(updated, patch) or updated_etag != '"' + hashlib.sha256(saved).hexdigest() + '"':
+        raise SetupError("The saved settings could not be verified.", "Inspect config.yaml; the previous version is in " + tidy(backup))
+    config_path.chmod(0o600)
+    # Do not bless unrelated local edits as installer-generated configuration.
+    if metadata.get("config_sha256") == original_hash:
+        metadata["config_sha256"] = hashlib.sha256(saved).hexdigest()
+    metadata["reliability_profile"] = 1
+    atomic_write(metadata_path, json.dumps(metadata, indent=2) + "\n")
+    wait_ready(port, local_key)
+    ok("Applied settings through CLIProxyAPI's hot reload; existing keys and provider routes were preserved.")
+    print("No payload or effort overrides were added. Upstream schema enforcement and usage reporting are unchanged.")
 
 
 def install(args):
@@ -505,14 +623,21 @@ def main():
     parser.add_argument("--port", type=int, help="Local loopback port (default: 8317)")
     parser.add_argument("--reconfigure", action="store_true", help="Set the API key again and refresh the discovered models")
     parser.add_argument("--replace-config", action="store_true", help="Allow reconfiguration to replace locally edited config, with backup")
+    parser.add_argument("--apply-workarounds", action="store_true",
+                        help="Hot-reload reliability settings into an existing running managed gateway; keep keys, routes and unrelated edits")
     args = parser.parse_args()
     if args.purge and not args.uninstall:
         parser.error("--purge requires --uninstall")
+    if args.apply_workarounds and (args.uninstall or args.purge or args.api_key_file or args.reconfigure
+                                  or args.replace_config or args.port is not None or args.base_url != DEFAULT_BASE_URL):
+        parser.error("--apply-workarounds cannot be combined with installation/reconfiguration options")
     if args.uninstall and (args.api_key_file or args.reconfigure or args.replace_config
                            or args.port is not None or args.base_url != DEFAULT_BASE_URL):
         parser.error("--uninstall cannot be combined with installation/reconfiguration options")
     try:
-        if args.uninstall:
+        if args.apply_workarounds:
+            apply_workarounds()
+        elif args.uninstall:
             uninstall(purge=args.purge)
         else:
             install(args)
