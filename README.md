@@ -45,13 +45,23 @@ python3 configure_agents.py --dry-run
 python3 configure_agents.py
 ```
 
-This discovers local models and configures installed **OpenCode, Pi, Codex, and Claude Code**. It merges OpenCode/Pi providers and creates separate Codex/Claude profiles, preserving existing defaults. Credentials stay in the private gateway key file. Existing files are backed up before changes; conflicting or edited KONDash entries require `--replace`.
+This discovers local models and configures installed **OpenCode, Pi, Codex, and Claude Code**. It merges OpenCode/Pi providers and creates separate Codex/Claude profiles, preserving existing defaults. Credentials stay in the private gateway key file. Re-running only syncs the KONDash model list and never overwrites existing or locally edited settings; `--replace` regenerates KONDash entries. Existing files are backed up before changes.
 
 To configure only selected clients, use `python3 configure_agents.py --agents opencode pi`. See [client setup](docs/clients.md) for activation commands, supported versions, and Codex model metadata requirements.
 
 The provider appears as **KONDash**. Pi/OpenCode thinking controls are enabled for every model by default; limit or disable them per model with `--model '<deployment-id>' --reasoning-efforts [levels]`. [Live compatibility checks](docs/clients.md#compatibility-checks) cover coding tools, MCP, and effort forwarding using `test_agents.py`.
 
-## Reconfigure or refresh available models
+## Refresh available models
+
+When KONDash adds or removes models:
+
+```bash
+python3 install.py --refresh-models
+```
+
+This reuses the stored key, rewrites only the gateway's two model lists (other settings and local edits are kept, with a backup), and restarts the service. Claude Code picks up the new list from the gateway. OpenCode, Pi, and Codex keep their own copy of the list; rerun `python3 configure_agents.py` to update them.
+
+## Reconfigure
 
 ```bash
 python3 install.py --reconfigure

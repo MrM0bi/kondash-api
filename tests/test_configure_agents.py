@@ -224,27 +224,58 @@ class SetupTests(unittest.TestCase):
         self.assertIsNone(child['key'])
         self.assertIsNone(child['bedrock'])
 
-    def test_conflicting_entry_prevents_all_writes_and_replace_backs_up(self):
-        path = self.write(self.home / '.pi/agent/models.json', '{"providers":{"kondash":{"mine":true}}}')
+    def test_existing_provider_keeps_custom_settings_and_only_syncs_models(self):
+        path = self.write(self.home / '.pi/agent/models.json',
+                          '{"providers":{"other":{"api":"x"},"kondash":{"baseUrl":"http://custom/v1","mine":true,'
+                          '"models":[{"id":"example-coder","contextWindow":1}]}}}')
         before = path.read_bytes()
-        with self.assertRaises(setup.SetupError) as caught:
-            self.run_setup()
-        self.assertIn('--replace', caught.exception.fix)
-        self.assertFalse((self.config / 'opencode').exists())
-        self.assertEqual(path.read_bytes(), before)
+        self.run_setup()
+        data = json.loads(path.read_text())['providers']
+        self.assertEqual(data['other'], {'api': 'x'})
+        kondash = data['kondash']
+        self.assertEqual((kondash['baseUrl'], kondash['mine'], kondash['name']), ('http://custom/v1', True, 'KONDash'))
+        self.assertEqual([m['id'] for m in kondash['models']], ['example-coder', 'example-fast'])
+        self.assertEqual(kondash['models'][0], {'id': 'example-coder', 'contextWindow': 1})
         self.args.replace = True
         self.run_setup()
-        backup = next((self.gateway / 'agents/backups').glob('before-*'))
-        self.assertTrue(any(p.read_bytes() == before for p in backup.iterdir()))
+        self.assertEqual(json.loads(path.read_text())['providers']['kondash']['baseUrl'], 'http://127.0.0.1:8317/v1')
+        self.assertTrue(any(p.read_bytes() == before for p in (self.gateway / 'agents/backups').glob('before-*/*')))
 
-    def test_user_edited_generated_file_is_not_overwritten(self):
+    def test_model_refresh_adds_and_drops_only_gateway_models(self):
         self.run_setup()
+        path = self.config / 'opencode/opencode.json'
+        data = json.loads(path.read_text())
+        models = data['providers']['kondash']['models']
+        models['example-coder']['limit']['context'] = 1  # local tweak
+        models['my-alias'] = {'name': 'added by hand'}
+        path.write_text(json.dumps(data))
+        self.models[:] = ['example-coder', 'example-new']
+        self.run_setup()
+        models = json.loads(path.read_text())['providers']['kondash']['models']
+        self.assertEqual(set(models), {'example-coder', 'example-new', 'my-alias'})
+        self.assertEqual(models['example-coder']['limit']['context'], 1)
+
+    def test_client_state_in_codex_profile_survives_and_stale_default_is_retargeted(self):
+        self.catalog['models'].append(dict(self.catalog['models'][0], slug='example-fast'))
+        self.args.model = 'example-fast'
+        self.run_setup()
+        self.args.model = None
         path = self.home / '.codex/kondash.config.toml'
-        path.write_text(path.read_text() + '# my edits\n')
-        with self.assertRaises(setup.SetupError) as caught:
-            self.run_setup()
-        self.assertIn('--replace', caught.exception.fix)
-        self.assertTrue(path.read_text().endswith('# my edits\n'))
+        state = '\n[mcp_servers.kova]\ncommand = "kova"\n'
+        path.write_text(path.read_text() + state)
+        settings = self.gateway / 'agents/claude.settings.json'
+        settings.write_text(settings.read_text().replace('"apiKeyHelper"', '"mine": 1, "apiKeyHelper"'))
+        output = self.run_setup()  # no --model: the previous default is kept
+        self.assertIn('Unchanged ~/.codex/kondash.config.toml', output)
+        self.assertIn('model = "example-fast-proxy"', path.read_text())
+        self.models.remove('example-fast')
+        self.run_setup()
+        profile = path.read_text()
+        self.assertIn('model = "example-coder-proxy"', profile)
+        self.assertTrue(profile.endswith(state))
+        claude = json.loads(settings.read_text())
+        self.assertEqual((claude['model'], claude['env']['ANTHROPIC_DEFAULT_OPUS_MODEL'], claude['mine']),
+                         ('example-coder', 'example-coder', 1))
 
     def test_unknown_codex_model_fails_preflight(self):
         self.models[:] = ['example-unknown']
@@ -306,17 +337,16 @@ class SetupTests(unittest.TestCase):
         self.args.kova_mcp = True
         original = '{"mcp":{"servers":{"kova":{"type":"local","command":["custom"]}}}}'
         path = self.write(self.config / 'opencode/opencode.json', original)
-        with self.assertRaises(setup.SetupError) as caught:
-            self.run_setup()
-        self.assertIn('--replace', caught.exception.fix)
-        self.assertEqual(path.read_text(), original)
-        self.assertFalse((self.gateway / 'agents').exists())
+        self.run_setup()
+        data = json.loads(path.read_text())
+        self.assertEqual(data['mcp']['servers']['kova']['command'], ['custom'])
+        self.assertIn('kondash', data['providers'])
+        original = path.read_text()
         self.args.replace = True
         self.run_setup()
         self.assertEqual(json.loads(path.read_text())['mcp']['servers']['kova']['command'], ['kova', '--mcp'])
-        backups = list((self.gateway / 'agents/backups').glob('before-*/*-opencode.json'))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_text(), original)
+        backups = [b.read_text() for b in (self.gateway / 'agents/backups').glob('before-*/*-opencode.json')]
+        self.assertIn(original, backups)
 
     def test_kova_mcp_dry_run_writes_nothing(self):
         self.args.kova_mcp = True
@@ -353,9 +383,8 @@ class SetupTests(unittest.TestCase):
         self.args.agents = ['pi']
         auth = self.write(self.home / '.pi/agent/auth.json',
                           '{"other":{"type":"api_key","key":"synthetic-other"},"kondash":{"type":"api_key","key":"synthetic-old"}}')
-        with self.assertRaises(setup.SetupError) as caught:
-            self.run_setup()
-        self.assertIn('--replace', caught.exception.fix)
+        self.run_setup()
+        self.assertEqual(json.loads(auth.read_text())['kondash']['key'], 'synthetic-old')
         self.args.replace = True
         self.run_setup()
         data = json.loads(auth.read_text())

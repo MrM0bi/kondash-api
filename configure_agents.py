@@ -179,19 +179,61 @@ class Plan:
         identity = str(path) + '::' + json.dumps(member_path)
         if (current is not MISSING and current != value and not self.replace
                 and self.state["entries"].get(identity) != digest(current)):
-            raise SetupError("The managed agent configuration entry already exists or was edited.",
-                             "Run again with --replace; the current file is backed up first.")
+            skip("Keeping existing " + '.'.join(member_path) + " in " + tidy(path) + " (--replace overwrites it)")
+            return
         if current is MISSING or current != value:
             change["after"] = upsert_jsonc(text, member_path, value).encode()
         self.state["entries"][identity] = digest(value)
 
-    def file(self, path, text, mode=0o600):
+    def provider(self, path, member_path, value, regenerate=()):
+        """Add missing provider settings and models; drop models the gateway no longer offers.
+
+        Existing settings and existing model entries are kept as they are (unless --replace),
+        so machine-specific tweaks survive model refreshes.
+        """
+        path, change = self.original(path)
+        text = change["after"].decode() if change["after"] is not None else '{}\n'
+        current = get_member(parse_jsonc(text), member_path)
+        identity = str(path) + '::' + json.dumps(member_path)
+        managed = self.state.setdefault("models", {})
+        if current is MISSING or self.replace:
+            merged = value
+        else:
+            if not isinstance(current, dict):
+                raise SetupError("The existing KONDash provider entry must be an object; no files changed.")
+            wanted = value['models']
+            as_list = isinstance(wanted, list)
+            if as_list:
+                wanted = {model['id']: model for model in wanted}
+            existing = current.get('models', [] if as_list else {})
+            if isinstance(existing, list) != as_list:
+                raise SetupError("The existing KONDash model list has an unexpected shape; no files changed.")
+            pairs = ([(entry.get('id') if isinstance(entry, dict) else None, entry) for entry in existing]
+                     if as_list else list(existing.items()))
+            # Upgrades from versions without a model record: everything in our own entry was generated.
+            previous = set(managed.get(identity, [model for model, _ in pairs]
+                                       if identity in self.state["entries"] else []))
+            kept = [(model, wanted[model] if model in regenerate and model in wanted else entry)
+                    for model, entry in pairs if model in wanted or model not in previous]
+            kept += [(model, entry) for model, entry in wanted.items() if model not in dict(kept)]
+            merged = dict(current, **{key: item for key, item in value.items() if key not in current},
+                          models=[entry for _, entry in kept] if as_list else dict(kept))
+        if merged != current:
+            change["after"] = upsert_jsonc(text, member_path, merged).encode()
+        managed[identity] = sorted(model['id'] for model in value['models']) if isinstance(value['models'], list) \
+            else sorted(value['models'])
+
+    def file(self, path, text, mode=0o600, update=None):
+        """Write a generated file; a locally edited one is kept, with only `update(text)` applied to it."""
         path, change = self.original(path)
         proposed = text.encode()
         if (change["before"] is not None and change["before"] != proposed and not self.replace
                 and self.state["files"].get(str(path)) != digest(change["before"])):
-            raise SetupError("A generated KONDash profile/helper already exists or was edited.",
-                             "Run again with --replace; the current file is backed up first.")
+            if update:
+                change["after"] = update(change["before"].decode()).encode()
+            else:
+                skip("Keeping locally edited " + tidy(path) + " (--replace regenerates it)")
+            return
         change["after"] = proposed
         change["target_mode"] = mode
         self.state["files"][str(path)] = digest(proposed)
@@ -403,8 +445,10 @@ def configure(args):
     if not isinstance(reasoning, dict):
         raise SetupError('The private reasoning preferences must be an object.')
     requested_efforts = getattr(args, 'reasoning_efforts', None)
+    regenerate = ()
     if requested_efforts is not None:
         reasoning[selected] = list(dict.fromkeys(requested_efforts))
+        regenerate = (selected,)  # explicitly requested: rebuild that model's entry
     for levels in reasoning.values():
         if not isinstance(levels, list) or any(level not in EFFORTS for level in levels):
             raise SetupError('The private reasoning preferences contain unsupported levels.')
@@ -434,7 +478,7 @@ def configure(args):
                                    'variants': [{'id': level, 'settings': {'reasoningEffort': level}}
                                                 for level in oc_efforts[model]]} if oc_efforts.get(model) else {}),
                                'limit': {'context': 128000, 'output': 8192}} for model in models}}
-        plan.entry(path, ('providers' if modern else 'provider', PROVIDER), provider)
+        plan.provider(path, ('providers' if modern else 'provider', PROVIDER), provider, regenerate)
         if getattr(args, 'kova_mcp', False):
             server = {'type': 'local', 'command': ['kova', '--mcp']}
             if not modern:
@@ -449,7 +493,7 @@ def configure(args):
                                                         for level in ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')}}
                                    if efforts[model] else {}),
                                 'input': ['text'], 'contextWindow': 128000, 'maxTokens': 8192} for model in models]}
-        plan.entry(folder / 'models.json', ('providers', PROVIDER), provider)
+        plan.provider(folder / 'models.json', ('providers', PROVIDER), provider, regenerate)
         auth = folder / 'auth.json'
         if auth.exists() and PROVIDER in parse_jsonc(auth.read_text()):
             plan.entry(auth, (PROVIDER,), {'type': 'api_key', 'key': '!' + credential_command})
@@ -459,10 +503,16 @@ def configure(args):
         # Codex uses the translated route, so its catalog slugs carry the route suffix.
         routed = {'models': [dict(model, slug=model['slug'] + PROXY_SUFFIX) for model in catalog['models']]}
         plan.file(catalog_path, json.dumps(routed, indent=2) + '\n')
-        selected_info = next(model for model in catalog['models'] if model['slug'] == selected)
+        profile_path = folder / (PROVIDER + '.config.toml')
+        slugs = {model['slug'] for model in catalog['models']}
+        current = re.search(r'^model = "(.*)"$', profile_path.read_text().split('\n[', 1)[0], re.M) \
+            if profile_path.exists() else None
+        current = current and current[1].removesuffix(PROXY_SUFFIX)
+        codex_model = selected if args.model or current not in slugs else current
+        selected_info = next(model for model in catalog['models'] if model['slug'] == codex_model)
         efforts = {entry.get('effort') for entry in selected_info.get('supported_reasoning_levels', [])}
         profile = ('# Managed by ' + OWNER + '\n'
-                   'model = ' + json.dumps(selected + PROXY_SUFFIX) + '\n'
+                   'model = ' + json.dumps(codex_model + PROXY_SUFFIX) + '\n'
                    'model_provider = "' + PROVIDER + '"\n'
                    'model_catalog_json = ' + json.dumps(str(catalog_path)) + '\n'
                    + ('model_reasoning_effort = "low"\n' if 'low' in efforts else '')
@@ -472,15 +522,26 @@ def configure(args):
                    '[model_providers.' + PROVIDER + '.auth]\ncommand = ' + json.dumps(cat) + '\n'
                    'args = ' + json.dumps([str(key_file)]) + '\n\n'
                    '[model_providers.' + PROVIDER + '.capabilities]\nremote_compaction = "unsupported"\n')
-        plan.file(folder / (PROVIDER + '.config.toml'), profile)
+        # Codex stores its own state (trusted projects, MCP servers, ...) in the active profile file.
+        plan.file(profile_path, profile, update=lambda text: text if codex_model == current else re.sub(
+            r'^model = .*$', lambda _: 'model = ' + json.dumps(codex_model + PROXY_SUFFIX), text, count=1, flags=re.M))
     if 'claude' in executables:
         settings = gateway_dir / 'agents/claude.settings.json'
-        plan.file(settings, json.dumps({'model': selected, 'apiKeyHelper': credential_command,
+        current = parse_jsonc(settings.read_text()).get('model') if settings.exists() else None
+        claude_model = selected if args.model or current not in models else current
+        slots = ('ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL')
+
+        def retarget(text):
+            if claude_model == current:
+                return text
+            for member in [('model',)] + [('env', slot) for slot in slots]:
+                text = upsert_jsonc(text, member, claude_model)
+            return text
+
+        plan.file(settings, json.dumps({'model': claude_model, 'apiKeyHelper': credential_command,
                   'env': {'ANTHROPIC_BASE_URL': base_url[:-3],
-                          'ANTHROPIC_DEFAULT_SONNET_MODEL': selected,
-                          'ANTHROPIC_DEFAULT_OPUS_MODEL': selected,
-                          'ANTHROPIC_DEFAULT_HAIKU_MODEL': selected,
-                          'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY': '1'}}, indent=2) + '\n')
+                          **dict.fromkeys(slots, claude_model),
+                          'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY': '1'}}, indent=2) + '\n', update=retarget)
         launcher = Path.home() / '.local/bin/claude-kondash'
         if launcher.is_symlink():
             raise SetupError("~/.local/bin/claude-kondash already exists as a symlink.",
@@ -515,7 +576,7 @@ def main():
     parser.add_argument('--codex-catalog', type=Path, help='Use a private Codex catalog for deployment aliases absent from bundled metadata')
     parser.add_argument('--reasoning-efforts', nargs='*', choices=EFFORTS,
                         help='Limit the selected model to these Pi/OpenCode v2 reasoning levels (default: all); remembered privately. Pass no levels to disable.')
-    parser.add_argument('--replace', action='store_true', help='Back up and replace conflicting or edited KONDash entries/profiles')
+    parser.add_argument('--replace', action='store_true', help='Back up and regenerate KONDash entries/profiles, discarding local edits to them')
     parser.add_argument('--kova-mcp', action='store_true',
                         help='Configure kova --mcp as a global MCP server in OpenCode only (requires kova on its PATH)')
     parser.add_argument('--dry-run', action='store_true', help='Preflight and report planned changes without writing files')

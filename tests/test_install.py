@@ -97,6 +97,59 @@ class InstallerTests(unittest.TestCase):
                 archive.addfile(item, io.BytesIO(data))
         return content.getvalue()
 
+    def test_refresh_swaps_only_managed_model_lists(self):
+        url = "https://gateway.example/v1"
+        generated = install.yaml_dump(install.build_config(url, ["old-model"], "synthetic-upstream", "synthetic-local",
+                                                           8317, self.root, "synthetic-management")) + "\n"
+        # CLIProxyAPI re-serializes the file: 4-space indent, sorted entry keys, foreign entries and comments kept.
+        rewritten = """# kept comment
+api-keys:
+    codex:
+        - base-url: "https://other.example/v1"
+          keys:
+            - api-key: "synthetic-other"
+          models:
+            - name: other-model
+        - base-url: "https://gateway.example/v1"
+          keys:
+            - api-key: "synthetic-upstream"
+              disable-codex-cloaking: true
+          models:
+            - alias: old-model
+              name: old-model
+          name: kondash-responses
+    openai-compatibility:
+        - base-url: "http://127.0.0.1:8317/v1"
+          keys:
+            - api-key: "synthetic-local"
+          models:
+            - alias: old-model-proxy
+              name: old-model
+          name: OpenAPI-Compatible
+models:
+    catalog: kept
+routing:
+    retry: 1
+"""
+        for text in (generated, rewritten):
+            key, updated = install.swap_models(text, url, 8317, ["new-a", "new-b"])
+            self.assertEqual(key, "synthetic-upstream")
+            self.assertNotIn("old-model", updated)
+            self.assertEqual(updated.count("new-a-proxy"), 1)
+            self.assertEqual(install.swap_models(updated, url, 8317, ["new-a", "new-b"])[1], updated)
+        self.assertIn("other-model", updated)
+        self.assertIn("catalog: kept", updated)
+        self.assertTrue(updated.startswith("# kept comment") and updated.endswith("routing:\n    retry: 1\n"))
+        self.assertEqual(updated.replace(install.yaml_dump(install.model_lists(["new-a", "new-b"])["codex"], 12), "X")
+                         .replace(install.yaml_dump(install.model_lists(["new-a", "new-b"])["openai-compatibility"], 12), "X"),
+                         rewritten.replace("""            - alias: old-model
+              name: old-model
+""", "X\n").replace("""            - alias: old-model-proxy
+              name: old-model
+""", "X\n"))
+        with self.assertRaisesRegex(install.SetupError, "KONDash entries"):
+            install.swap_models(rewritten, "https://elsewhere.example/v1", 8317)
+
     def test_release_checksum_failure_installs_no_executable(self):
         with patch.object(install, "RELEASES", {"test": ("test", "0" * 64)}), \
                 patch.object(install, "fetch_release", return_value=self.archive()):

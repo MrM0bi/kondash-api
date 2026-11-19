@@ -55,7 +55,15 @@ The service listens only on IPv4 loopback and requires a local Bearer token. The
 
 Rerun `python3 install.py` to install the pinned release and service again while preserving the existing YAML and local key. It does not need the upstream key again when preserving an existing managed configuration.
 
-To set a new upstream key or refresh model discovery:
+To pick up models KONDash added or removed, without entering the key again:
+
+```bash
+python3 install.py --refresh-models
+```
+
+This reads the upstream key from `config.yaml`, asks KONDash for the current list, replaces only the `models` lists of the managed KONDash entry and its local `-proxy` bridge, backs up the previous file, and restarts the service. Other providers, comments, and local edits stay as they are. If you installed with a custom `--base-url`, pass it again.
+
+To set a new upstream key, or rebuild the whole configuration:
 
 ```bash
 python3 install.py --reconfigure
