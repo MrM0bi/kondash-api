@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import platform
 import pwd
+import re
 import secrets
 import shutil
 import socket
@@ -133,6 +134,13 @@ def discover_models(base_url, key):
     return models
 
 
+def model_lists(models):
+    return {"codex": [{"name": model, "alias": model, "input-modalities": ["text"], "output-modalities": ["text"]}
+                      for model in models],
+            "openai-compatibility": [{"name": model, "alias": model + PROXY_SUFFIX, "use-max-completion-tokens": True}
+                                     for model in models]}
+
+
 def build_config(base_url, models, upstream_key, local_key, port, config_dir, management_key):
     return {
         "config-version": 8,
@@ -145,14 +153,11 @@ def build_config(base_url, models, upstream_key, local_key, port, config_dir, ma
         "api-keys": {
             "codex": [{"name": "kondash-responses", "base-url": base_url,
                        "keys": [{"api-key": upstream_key, "disable-codex-cloaking": True}],
-                       "models": [{"name": model, "alias": model,
-                                   "input-modalities": ["text"], "output-modalities": ["text"]}
-                                  for model in models]}],
+                       "models": model_lists(models)["codex"]}],
             "openai-compatibility": [{"name": "OpenAPI-Compatible",
                                       "base-url": f"http://127.0.0.1:{port}/v1",
                                       "keys": [{"api-key": local_key}],
-                                      "models": [{"name": model, "alias": model + PROXY_SUFFIX,
-                                                  "use-max-completion-tokens": True} for model in models]}],
+                                      "models": model_lists(models)["openai-compatibility"]}],
         },
         "observability": {"logs": {"debug": False, "logging-to-file": True, "request-log": False,
                                     "error-logs-max-files": 5, "logs-max-total-size-mb": 100},
@@ -176,6 +181,79 @@ def yaml_dump(value, indent=0):
                          if isinstance(item, (dict, list)) else prefix + "- " + json.dumps(item, ensure_ascii=False)
                          for item in value)
     raise SetupError("Unsupported configuration value.")
+
+
+def swap_models(text, base_url, port, models=None):
+    """Return (upstream key, text with the managed entries' model lists replaced); other lines stay untouched.
+
+    Handles both this installer's YAML and CLIProxyAPI's re-serialized form (it rewrites the file itself).
+    """
+    targets = {"codex": base_url, "openai-compatibility": f"http://127.0.0.1:{port}/v1"}
+    lists = model_lists(models) if models else None
+    lines, out, found = text.splitlines(keepends=True), [], set()
+    section = section_indent = url = key = None
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        out.append(line)
+        index += 1
+        match = re.match(r"(\s*(?:- )?)([\w-]+):[ \t]*(.*?)\s*$", line)
+        if not match:
+            continue
+        column, name, value = len(match[1]), match[2], match[3]
+        if value[:1] == '"':
+            value = json.loads(value)
+        elif value[:1] == "'":
+            value = value[1:-1].replace("''", "'")
+        if section and column <= section_indent:
+            section = None
+        if name in targets and not value:
+            section, section_indent, url = name, column, None
+        elif section and name == "base-url":
+            url = value
+        elif section == "codex" and url == base_url and name == "api-key" and key is None:
+            key = value
+        elif section and url == targets[section] and name == "models" and not value:
+            found.add(section)
+            if lists:
+                while index < len(lines) and (not lines[index].strip()
+                                              or len(lines[index]) - len(lines[index].lstrip()) > column):
+                    index += 1
+                out.append(yaml_dump(lists[section], column + 2) + "\n")
+    if not key or found != set(targets):
+        raise SetupError("Cannot find the KONDash entries in the gateway configuration.",
+                         "Pass the --base-url used at install time, or rebuild it: python3 install.py --reconfigure")
+    return key, "".join(out)
+
+
+def refresh_models(args):
+    targets = paths()
+    config_path = targets["config"] / "config.yaml"
+    metadata_path = targets["config"] / "kondash-install.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    if not config_path.exists() or metadata.get("managed_by") != OWNER:
+        raise SetupError("No KONDash gateway installed by this script was found.", "Install it first: python3 install.py")
+    port = metadata.get("port", 8317)
+    base_url = validate_base_url(args.base_url)
+    text = config_path.read_text()
+    tracked = hashlib.sha256(text.encode()).hexdigest() == metadata.get("config_sha256")
+    upstream_key, _ = swap_models(text, base_url, port)
+    step("Asking KONDash for the current model list")
+    models = discover_models(base_url, upstream_key)
+    _, updated = swap_models(text, base_url, port, models)
+    if updated == text:
+        ok(f"Already up to date ({len(models)} models)")
+        return
+    backup = config_path.with_name("config.yaml.backup-" + time.strftime("%Y%m%d-%H%M%S"))
+    atomic_write(backup, text)
+    atomic_write(config_path, updated)
+    ok(f"Updated {len(models)} models in {tidy(config_path)} (previous version: {backup.name}); other settings kept")
+    command(["systemctl", "--user", "restart", SERVICE], "Restarting CLIProxyAPI")
+    wait_ready(port, read_or_create_key(targets["config"] / "proxy-key"))
+    ok(f"Service restarted and answering on port {port}")
+    if tracked:  # keep an unedited config recognisable as unedited for later --reconfigure runs
+        metadata.update(config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest())
+        atomic_write(metadata_path, json.dumps(metadata, indent=2) + "\n")
 
 
 def fetch_release(url):
@@ -504,6 +582,8 @@ def main():
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Override the preconfigured HTTPS KONDash API URL")
     parser.add_argument("--port", type=int, help="Local loopback port (default: 8317)")
     parser.add_argument("--reconfigure", action="store_true", help="Set the API key again and refresh the discovered models")
+    parser.add_argument("--refresh-models", action="store_true",
+                        help="Update the gateway's model list using the stored key; keeps all other settings")
     parser.add_argument("--replace-config", action="store_true", help="Allow reconfiguration to replace locally edited config, with backup")
     args = parser.parse_args()
     if args.purge and not args.uninstall:
@@ -511,8 +591,13 @@ def main():
     if args.uninstall and (args.api_key_file or args.reconfigure or args.replace_config
                            or args.port is not None or args.base_url != DEFAULT_BASE_URL):
         parser.error("--uninstall cannot be combined with installation/reconfiguration options")
+    if args.refresh_models and (args.uninstall or args.api_key_file or args.reconfigure or args.replace_config
+                                or args.port is not None):
+        parser.error("--refresh-models only combines with --base-url")
     try:
-        if args.uninstall:
+        if args.refresh_models:
+            refresh_models(args)
+        elif args.uninstall:
             uninstall(purge=args.purge)
         else:
             install(args)

@@ -23,14 +23,14 @@ All selected clients are checked before any configuration is written. The defaul
 - **Codex:** run `codex --profile kondash`.
 - **Claude Code:** run `~/.local/bin/claude-kondash`, or `claude-kondash` if `~/.local/bin` is on your `PATH`.
 
-OpenCode and Pi retain their previous default model. Codex and Claude use the gateway only when launching their separate profile. To choose the starting deployment for those profiles, pass `--model '<deployment-id>'` with the raw deployment ID, without the `-proxy` suffix. By default the script selects the first matching Codex catalog entry, or the first discovered deployment when Codex is excluded.
+OpenCode and Pi retain their previous default model. Codex and Claude use the gateway only when launching their separate profile. To choose the starting deployment for those profiles, pass `--model '<deployment-id>'` with the raw deployment ID, without the `-proxy` suffix. Without `--model`, an existing profile keeps its current deployment while the gateway still offers it; otherwise the script selects the first matching Codex catalog entry, or the first discovered deployment when Codex is excluded.
 
 ## Files and existing configuration
 
 The following are default paths. `XDG_CONFIG_HOME`, `CODEX_HOME`, and `PI_CODING_AGENT_DIR` are respected.
 
 - OpenCode: merges the `kondash` provider into `~/.config/opencode/opencode.jsonc` if present, otherwise `opencode.json`. Other providers, defaults, and unrelated JSONC comments are retained. OpenCode v2 uses its Responses runtime; v1 uses its OpenAI-compatible Chat runtime and older configuration schema.
-- Pi: merges the provider into `~/.pi/agent/models.json`, using its `openai-responses` adapter. If `auth.json` already contains a credential for this provider, replacing it requires `--replace`; other credentials remain intact.
+- Pi: merges the provider into `~/.pi/agent/models.json`, using its `openai-responses` adapter. An existing credential for this provider in `auth.json` is kept unless you pass `--replace`; other credentials remain intact.
 - Codex: creates `~/.codex/kondash.config.toml` and a private catalog under `~/.config/cliproxyapi/agents/`. It leaves the base `config.toml` unchanged.
 - Claude Code: creates private settings under `~/.config/cliproxyapi/agents/` and a `~/.local/bin/claude-kondash` launcher. Global Claude settings remain unchanged. The launcher clears conflicting inherited provider credentials and cloud routing flags in its child process, then loads the gateway settings. The Opus/Sonnet/Haiku slots all route to the selected deployment; these slot names do not identify the underlying model.
 
@@ -38,13 +38,19 @@ The configurations reference the local `proxy-key` file through file substitutio
 
 Existing files are backed up privately under `~/.config/cliproxyapi/agents/backups/before-*/` before modification. Each backup has a `restore-paths.json` recording the original destinations and modes. `--dry-run` creates neither files nor backups. To restore manually, stop the affected client and copy the selected backup files to those destinations; remove newly generated profiles if needed.
 
-Re-running setup refreshes entries it owns, including discovered models. An unrelated existing KONDash entry or a locally edited generated entry/profile requires an explicit replacement:
+Re-running setup never overwrites existing configuration. It only syncs the KONDash model list:
+
+- **OpenCode/Pi:** missing provider settings and models are added, and models the gateway no longer offers are removed. Existing provider settings, local tweaks to existing model entries, and models you added by hand stay as they are.
+- **Codex profile and Claude settings:** created when missing. Once they exist (Codex also writes its own state, such as trusted projects and MCP servers, into the profile), only the default model is switched, and only when the gateway no longer offers it or you pass `--model`.
+- **Pi `auth.json`, the Claude launcher, and `--kova-mcp`:** an existing entry or locally edited file is kept and reported.
+
+To discard local edits and regenerate KONDash entries and profiles (backed up first, unrelated settings still preserved):
 
 ```bash
 python3 configure_agents.py --replace
 ```
 
-That replacement still backs up the existing files and preserves unrelated settings. Run setup again after `install.py --reconfigure` changes available deployments. Removing a provider from the gateway does not automatically remove it from agent configuration until setup is rerun.
+Run setup again after the gateway's models change (`install.py --refresh-models`); OpenCode, Pi, and Codex keep their own copy of the list.
 
 Gateway uninstall preserves agent settings. `install.py --uninstall --purge` deletes the private gateway configuration, key, catalogs, Claude settings, and backups; provider entries and launchers in agent directories remain and will need reconfiguration or manual removal.
 
